@@ -155,6 +155,55 @@ export Main(sys: &System) {
     a.Free()
 }
 `, "main.mk:11:5: E0501"},
+		{"the Fixed reset under a reset arena", `import std.mem
+
+export Main(sys: &System) {
+    buf := sys.arena.Slice[u8](65536) else {
+        return
+    }
+    var fixed := mem.Fixed.New(buf)
+    var a := Arena.NewIn(fixed.Alloc()) else {
+        return
+    }
+    a.Reset()
+    fixed.Reset()
+    a.Free()
+}
+`, "main.mk:12:5: E0501"},
+		{"a reset arena leaves the Fixed's frame", `import std.mem
+
+Make(sys: &System): OutOfMemory!Arena {
+    var buf: [8192]u8 = [0; 8192]
+    fixed := mem.Fixed.New(mut buf[..])
+    var a := try Arena.NewIn(fixed.Alloc())
+    a.Reset()
+    return a
+}
+
+export Main(sys: &System) {
+    var a := Make(sys) else {
+        return
+    }
+    a.Free()
+}
+`, "main.mk:8:5: E0603"},
+		{"the parent freed under a reset Sub", `import std.mem
+
+export Main(sys: &System) {
+    counting := mem.Counting.New(sys.heap.Alloc())
+    var a := Arena.NewIn(counting.Alloc()) else {
+        return
+    }
+    var s := a.Sub() else {
+        a.Free()
+        return
+    }
+    s.Reset()
+    a.Free()
+    s.Free()
+    _ = counting.Live()
+}
+`, "main.mk:13:5: E0503"},
 		{"the Fixed moved under the arena", `import std.mem
 
 export Main(sys: &System) {

@@ -360,6 +360,14 @@ var memNewLoanCases = []struct {
     h.Reset()
     _ = h.Alloc()
 }`, nil},
+	{"fixedheap-reset-keeps-buf", `B4(): int {
+    var buf: [256]u8 = [0; 256]
+    var h := mem.FixedHeap.New(mut buf[..])
+    h.Reset()
+    x := buf[0] // <-
+    _ = h.Alloc()
+    return Cast[int](x)
+}`, []string{"E0504"}},
 	{"limit-holds-inner", `C(h: &Heap): int {
     var ar := Arena.New(h) else {
         return 0
@@ -422,6 +430,24 @@ var memNewLoanCases = []struct {
     b.Reset()
     _ = b.Alloc()
 }`, nil},
+	{"fallback-reset-keeps-inner", `E5(h: &Heap) {
+    var buf: [64]u8 = [0; 64]
+    var ar := Arena.New(h) else {
+        return
+    }
+    var b := mem.Fallback.New(ar.Alloc(), mut buf[..])
+    b.Reset()
+    ar.Free() // <-
+    _ = b.Alloc()
+}`, []string{"E0503"}},
+	{"fallback-reset-keeps-buf", `E6(h: &Heap): int {
+    var buf: [64]u8 = [0; 64]
+    var b := mem.Fallback.New(h.Alloc(), mut buf[..])
+    b.Reset()
+    y := buf[0] // <-
+    _ = b.Alloc()
+    return Cast[int](y)
+}`, []string{"E0504"}},
 	{"fixedheap-not-share", `F(x: &mem.FixedHeap): int {
     return G(x) // <-
 }

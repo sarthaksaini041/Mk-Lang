@@ -2,9 +2,9 @@
 // root; copying whole states on every edge would make large bodies
 // quadratic.
 //
-// What: initBits, entry (init, held, moved, changed, on, fv, sh), state with
-// get, set, clone, freeze and equal, joinEntry, joinSh, joinInto and
-// takenToMoved.
+// What: initBits, entry (init, held, moved, changed, on, fv, sh, stored),
+// state with get, set, clone, freeze and equal, joinEntry, joinSh,
+// joinStored, joinInto and takenToMoved.
 //
 // How: a state is a persistent vector of fixed-size chunks copied on write;
 // the zero entry reads as {U}, holding nothing. A join is the pointwise
@@ -50,6 +50,11 @@ type entry struct {
 	// "all deep"; checker.put keeps sh within held, and every write that adds
 	// a loan other than through a marked store drops it from sh (deep wins).
 	sh setID
+	// stored is the loans of held that only ever reached this root through
+	// a store into its memory (storeInto: directWrite and storeArg), never
+	// as its own value. An ends call on a view or allocator root that is
+	// not moved drops stored and keeps the rest, the root's provenance.
+	stored setID
 }
 
 // initOf is the one reader of entry.init.
@@ -210,6 +215,7 @@ func joinEntry(ss *setStore, a, b entry) entry {
 		on:      ss.unite(a.on, b.on),
 		fv:      ss.joinFV(a.fv, b.fv),
 		sh:      joinSh(ss, a, b),
+		stored:  joinStored(ss, a, b),
 	}
 }
 
@@ -222,6 +228,17 @@ func joinSh(ss *setStore, a, b entry) setID {
 	}
 	deep := ss.unite(ss.minus(a.held, a.sh), ss.minus(b.held, b.sh))
 	return ss.minus(ss.unite(a.sh, b.sh), deep)
+}
+
+// joinStored is the join of the content-stored sets (provenance wins at
+// every join): a loan is in stored after the join when it is in stored on
+// every predecessor that holds it.
+func joinStored(ss *setStore, a, b entry) setID {
+	if a.stored == emptySet && b.stored == emptySet {
+		return emptySet
+	}
+	prov := ss.unite(ss.minus(a.held, a.stored), ss.minus(b.held, b.stored))
+	return ss.minus(ss.unite(a.stored, b.stored), prov)
 }
 
 // joinInto returns old ⊔ in (old may be nil: a block not yet reached) as a

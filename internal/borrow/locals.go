@@ -4,9 +4,9 @@
 // it whole.
 //
 // What: splitInfo and the per-field liveness elements (elem, fieldUses,
-// defElems), fieldOfLoan, writeSplit, storeLocal, fieldWrite, collapse and
-// collapseFor, holderLive, splitEntry, and the split-union self-check
-// (SetSplitUnionCheck, SplitUnionChecks).
+// defElems), fieldOfLoan, writeSplit, storeLocal and noteStored, fieldWrite,
+// collapse and collapseFor, holderLive, splitEntry, and the split-union
+// self-check (SetSplitUnionCheck, SplitUnionChecks).
 //
 // How: an allowlist of uses keeps a root split; every other use that may
 // write the whole value makes it whole (collapse). A by-value parameter
@@ -114,6 +114,7 @@ func (c *checker) writeSplit(st *state, r rootID, fs []setID, deep setID) {
 	old := e.held
 	e.held, e.fv = S, c.sets.internFV(fs)
 	e.sh = c.sets.minus(e.sh, deep)
+	e.stored = c.sets.minus(e.stored, deep)
 	c.put(st, r, e)
 	if added := c.sets.minus(S, old); added != emptySet {
 		if c.report {
@@ -130,9 +131,11 @@ func (c *checker) storeLocal(st *state, r rootID, S setID, f int) {
 	if S == emptySet {
 		return
 	}
+	old, oldSh, oldStored := st.get(r).held, st.get(r).sh, st.get(r).stored
 	fs := c.sets.fieldSets(st.get(r).fv)
 	if fs == nil || len(fs) != c.roots[r].nfields || !c.roots[r].carrier {
 		c.addHeld(st, r, S)
+		c.noteStored(st, r, old, oldStored, S)
 		return
 	}
 	out := slices.Clone(fs)
@@ -141,9 +144,24 @@ func (c *checker) storeLocal(st *state, r rootID, S setID, f int) {
 			out[i] = c.sets.unite(out[i], S)
 		}
 	}
-	old, oldSh := st.get(r).held, st.get(r).sh
 	c.writeSplit(st, r, out, S)
 	c.markStore(st, r, old, oldSh, S)
+	c.noteStored(st, r, old, oldStored, S)
+}
+
+// noteStored sets root r's content-stored set after a store of s into its
+// memory (storeLocal), given its held and stored sets before the store:
+// the loans of s that r did not hold before join stored, and those r held
+// in stored already stay there; a loan r held as its own value stays
+// outside stored (provenance wins).
+func (c *checker) noteStored(st *state, r rootID, old, oldStored, s setID) {
+	e := st.get(r)
+	stored := c.sets.meet(c.sets.unite(oldStored, c.sets.minus(s, old)), e.held)
+	if stored == e.stored {
+		return
+	}
+	e.stored = stored
+	c.put(st, r, e)
 }
 
 // fieldWrite is a destination `x.f… = e` with no deref on a split root

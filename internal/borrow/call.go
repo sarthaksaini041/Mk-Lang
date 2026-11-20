@@ -253,9 +253,17 @@ func (c *checker) call(st *state, ctx *stmtCtx, t *mir.Terminator) []out {
 	// entryH is every argument's set before steps 3 and 4: step 5 never
 	// reads it, the rounds' walk does (own).
 	entryH := slices.Clone(argH)
-	// What steps 3 and 4 store into each ends root: the call keeps those
-	// loans after it ends what the root held before it.
+	// What steps 3 and 4 store into each ends root, and the provenance
+	// loans a view or allocator root held as its own value before the
+	// call: the call keeps both after it ends the rest.
 	endsStored := make([]setID, len(endsRoots))
+	endsProv := make([]setID, len(endsRoots))
+	for i, r := range endsRoots {
+		if c.keepEndsProv(r) {
+			e := st.get(r)
+			endsProv[i] = c.allocSelf(r, c.sets.minus(e.held, e.stored))
+		}
+	}
 	if fv != nil {
 		// Steps 3 and 4 repeat until a round grows no argument's set and no
 		// root's held set: a clause applied early in a round may make a cell
@@ -387,13 +395,20 @@ func (c *checker) call(st *state, ctx *stmtCtx, t *mir.Terminator) []out {
 	c.endSlots(st, ctx)
 	c.destinationFV(st, ctx, t.Dest, res, resFV)
 	// Step 6: ends p ends what r held before the call, on the success
-	// edge. The loans this call stored into r in steps 3 and 4 stay: the
-	// callee may store them after it ends the rest, so dropping them would
-	// let a borrowed local end while r still refers to it (step 6 runs
-	// before steps 3 and 4 in effect, on the graph of the call's entry). The
-	// error edge keeps everything (es above).
+	// edge, keeping the provenance loans a view or allocator root held as
+	// its own value (Arena.NewIn, Arena.Sub, Fixed.New, FixedHeap.New,
+	// Fallback.New). The loans this call stored into r in steps 3 and 4
+	// stay too: the callee may store them after it ends the rest, so
+	// dropping them would let a borrowed local end while r still refers to
+	// it (step 6 runs before steps 3 and 4 in effect, on the graph of the
+	// call's entry). The error edge keeps everything (es above).
 	for i, r := range endsRoots {
-		c.setHeld(st, r, endsStored[i])
+		c.setHeld(st, r, c.sets.unite(endsProv[i], endsStored[i]))
+		if stored := c.sets.minus(endsStored[i], endsProv[i]); stored != emptySet {
+			e := st.get(r)
+			e.stored = c.sets.meet(stored, e.held)
+			c.put(st, r, e)
+		}
 	}
 	return append([]out{{t.Target, st}}, outs...)
 }
@@ -740,6 +755,15 @@ func (c *checker) exemptFor(st *state, ctx *stmtCtx, endsRoots []rootID, a mir.A
 // live root other than r reaches it.
 func (c *checker) exemption(st *state, ctx *stmtCtx, r rootID) func(loanID) bool {
 	return func(l loanID) bool { return !c.liveLoan(st, ctx, l, false, r) }
+}
+
+// keepEndsProv reports whether an ends call on root r keeps r's provenance
+// loans (the loans r held as its own value before the call, outside
+// e.stored) and ends only what was stored into r's memory: a view, an
+// allocator, or a type parameter or Self that an instance may make one.
+func (c *checker) keepEndsProv(r rootID) bool {
+	ri := &c.roots[r]
+	return ri.view || ri.allocator || c.inlineParam(ri.typ, map[types.TypeID]bool{})
 }
 
 // allocReferent reports whether argument a is a reference to an allocator

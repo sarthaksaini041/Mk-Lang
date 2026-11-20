@@ -1,8 +1,8 @@
 // Why: `ends` lets a callee end loans on its argument, and the exemptions
 // around it are where unsound programs could slip through.
 // What: tests of `ends` at calls that also store, on error edges, through
-// every callee kind and through argument slots, and of Result.Reads for
-// E0402's facts.
+// every callee kind and through argument slots, of provenance kept across
+// `ends` on views and allocators, and of Result.Reads for E0402's facts.
 // How: hand-built bodies (endsStoreBody, tieValue, tieWorld), checked for
 // E0505, E0501, E0503 and E1102.
 
@@ -396,4 +396,126 @@ func TestReadsRecordReleaseMethods(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestR18_EndsKeepsViewAndAllocatorProvenance: an `ends self` reset on an
+// Arena (from Arena.NewIn or Arena.Sub) or a view allocator (Fixed.New over
+// a buffer) ends what was stored into its contents (`x into self`, self-loans
+// included) while keeping the provenance loan the value holds on its backing
+// allocator or buffer; consuming Free(self) by value still ends everything.
+func TestR18_EndsKeepsViewAndAllocatorProvenance(t *testing.T) {
+	t.Run("arena-keeps-backing-ends-content", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                     string
+			reset, endBacking, moved bool
+		}{
+			{"reset-ends-content", true, false, false},
+			{"no-reset-content-outlives", false, false, false},
+			{"reset-keeps-backing", true, true, false},
+			{"moved-reset-keeps-backing", true, true, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				k := newKit(t)
+				ri := refI32(k)
+				ra := k.tab.Ref(k.Alloc)
+				newIn := k.method("Arena", "NewIn", types.NoReceiver, k.Arena, []types.Param{k.param("a", ra)}, k.Arena, types.EmptyErrors)
+				newIn.Flows.Sources = []types.Source{{Param: 1}}
+				put := k.method("Arena", "Put", types.ByShared, k.Arena, []types.Param{{Name: k.in.Intern("x"), Type: ri, Into: 1}}, types.Void, types.EmptyErrors)
+				reset := k.method("Arena", "Reset", types.ByMut, k.Arena, nil, types.Void, types.EmptyErrors)
+				reset.Flows.Ends = []types.ParamIndex{1}
+				free := k.method("Arena", "Free", types.ByValue, k.Arena, nil, types.Void, types.EmptyErrors)
+				free.Flows.Ends = []types.ParamIndex{1}
+
+				m := k.body(k.sig("F", nil, types.Void, types.EmptyErrors))
+				src := m.user("src", k.Alloc, false)
+				m.set(src, m.agg(mir.AggStruct, k.known.Alloc, k.Alloc, mir.Imm(k.tab.RawPtr(types.U8), 0)))
+				rsrc := m.temp(ra)
+				srcSite := m.set(rsrc, ref(m.local(src)))
+				a := m.user("a", k.Arena, true)
+				nx := m.block()
+				m.call(newIn.Item, nil, []mir.Arg{argCopy(m.local(rsrc))}, m.local(a), nx)
+				m.at(nx)
+				m.end(rsrc)
+
+				short := m.user("short", types.I32, false)
+				m.set(short, use(imm(types.I32, 7)))
+				rsh := m.temp(ri)
+				shSite := m.set(rsh, ref(m.local(short)))
+				ta := m.temp(k.tab.Ref(k.Arena))
+				m.set(ta, ref(m.local(a)))
+				m.callv("Arena.Put", nil, argCopy(m.local(ta)), argCopy(m.local(rsh)))
+				m.end(ta, rsh)
+
+				cur := a
+				if tc.moved {
+					a2 := m.user("a2", k.Arena, true)
+					m.set(a2, use(mv(m.local(a))))
+					cur = a2
+				}
+				if tc.reset {
+					tr := m.temp(k.tab.Mut(k.Arena))
+					m.set(tr, mutRef(m.local(cur)))
+					m.callv("Arena.Reset", nil, argMove(m.local(tr)))
+					m.end(tr)
+				}
+				m.end(short)
+				if tc.endBacking {
+					m.end(src)
+				}
+				m.callv("Arena.Free", nil, argMove(m.local(cur)))
+				m.end(cur)
+				if cur != a {
+					m.end(a)
+				}
+				if !tc.endBacking {
+					m.end(src)
+				}
+				m.ret(mir.ExitNormal)
+
+				switch {
+				case !tc.reset:
+					m.expect(t, m.check(t), diag.E0505, shSite)
+				case tc.endBacking:
+					m.expect(t, m.check(t), diag.E0505, srcSite)
+				default:
+					m.expect(t, m.check(t))
+				}
+			})
+		}
+	})
+
+	t.Run("view-reset-keeps-buffer-loan", func(t *testing.T) {
+		k := newKit(t)
+		k.structItem(k.std, "Fixed", 0, true, false, field("base", k.tab.RawPtr(types.U8)))
+		ft := k.named("Fixed")
+		mi := k.tab.Mut(types.I32)
+		fn := k.method("Fixed", "New", types.NoReceiver, ft, []types.Param{k.param("buf", mi)}, ft, types.EmptyErrors)
+		fn.Flows.Sources = []types.Source{{Param: 1}}
+		reset := k.method("Fixed", "Reset", types.ByMut, ft, nil, types.Void, types.EmptyErrors)
+		reset.Flows.Ends = []types.ParamIndex{1}
+
+		m := k.body(k.sig("F", nil, types.Void, types.EmptyErrors))
+		buf := m.user("buf", types.I32, true)
+		m.set(buf, use(imm(types.I32, 0)))
+		s := m.temp(mi)
+		m.set(s, mutRef(m.local(buf)))
+		f := m.user("f", ft, true)
+		nx := m.block()
+		m.call(fn.Item, nil, []mir.Arg{argMove(m.local(s))}, m.local(f), nx)
+		m.at(nx)
+		m.end(s)
+
+		tf := m.temp(k.tab.Mut(ft))
+		m.set(tf, mutRef(m.local(f)))
+		m.callv("Fixed.Reset", nil, argMove(m.local(tf)))
+		m.end(tf)
+
+		// Writing buf after Fixed.Reset while f is still used later must
+		// conflict with f's exclusive loan on buf.
+		bad := m.set(buf, use(imm(types.I32, 1)))
+		m.useRef(m.local(f), ft)
+		m.end(f, buf)
+		m.ret(mir.ExitNormal)
+		m.expect(t, m.check(t), diag.E0502, bad)
+	})
 }

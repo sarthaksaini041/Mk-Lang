@@ -162,6 +162,9 @@ func (c *checker) put(st *state, r rootID, e entry) {
 	if e.sh != emptySet {
 		e.sh = c.sets.meet(e.sh, e.held) // the shallow marks stay within held
 	}
+	if e.stored != emptySet {
+		e.stored = c.sets.meet(e.stored, e.held)
+	}
 	if e == old {
 		return
 	}

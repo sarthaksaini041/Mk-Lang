@@ -140,6 +140,7 @@ func (c *checker) restoreSlot(es *state, sl argSlot, t entry) {
 	x.held = t.held
 	x.fv = t.fv // the restore carries the field sets and the mode
 	x.sh = t.sh // and the shallow marks, which belong to that held set
+	x.stored = t.stored
 	x.moved = c.sets.minus(x.moved, one)
 	x.changed = c.sets.minus(x.changed, one)
 	c.put(es, sl.src, x)

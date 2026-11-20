@@ -104,12 +104,13 @@ func (c *checker) setHeld(st *state, r rootID, s setID) {
 		s = emptySet
 	}
 	e := st.get(r)
-	if e.held == s && e.sh == emptySet {
+	if e.held == s && e.sh == emptySet && e.stored == emptySet {
 		return
 	}
 	added := c.sets.minus(s, e.held)
 	e.held = s
 	e.sh = emptySet // a write of the whole set is deep (marks.go)
+	e.stored = emptySet
 	c.put(st, r, e)
 	if c.report {
 		c.noteStores(r, added)
@@ -242,9 +243,14 @@ func (c *checker) addHeld(st *state, r rootID, s setID) {
 		e.fv = 0
 		c.put(st, r, e)
 	}
-	old, oldSh := c.held(st, r), st.get(r).sh
+	old, oldSh, oldStored := c.held(st, r), st.get(r).sh, st.get(r).stored
 	c.setHeld(st, r, c.sets.unite(old, s))
 	c.markStore(st, r, old, oldSh, s)
+	if keep := c.sets.minus(oldStored, s); keep != emptySet {
+		e := st.get(r)
+		e.stored = c.sets.meet(keep, e.held)
+		c.put(st, r, e)
+	}
 }
 
 // loansOn lists, per root, the loans whose place is rooted there, in loan
@@ -351,9 +357,16 @@ func (c *checker) statement(st *state, ctx *stmtCtx, s *mir.Statement) {
 		if r, ok := c.endsForm[siteKey{ctx.b, uint32(ctx.i)}]; ok && c.report && s.Rvalue.Kind == mir.RvUse {
 			ctx.exempt = c.exemption(st, ctx, r)
 		}
+		stored := c.rvalueStored(st, &s.Rvalue)
 		S, fv := c.rvalueFV(st, ctx, s)
 		ctx.exempt = nil
 		c.destinationFV(st, ctx, s.Place, S, fv)
+		if stored != emptySet && s.Place.Proj.Len == 0 {
+			r := rootID(s.Place.Local)
+			e := st.get(r)
+			e.stored = c.sets.meet(stored, e.held)
+			c.put(st, r, e)
+		}
 		if ctx.bad409 && s.Place.Proj.Len == 0 {
 			// Error hygiene: a linear local that received
 			// the value of an E0409 read is marked moved with no move site,
@@ -517,6 +530,57 @@ func (c *checker) operandFV(st *state, ctx *stmtCtx, o mir.Operand) (setID, fvID
 		fv = 0 // nothing held (E0409's recovery, a non-carrier): no field holds anything
 	}
 	return s, fv
+}
+
+// rvalueStored is the content-stored set an rvalue carries from its operands,
+// read before the rvalue's effects move them.
+func (c *checker) rvalueStored(st *state, rv *mir.Rvalue) setID {
+	switch rv.Kind {
+	case mir.RvUse:
+		_, s := c.operandHeldStored(st, rv.A)
+		return s
+	case mir.RvCast:
+		if rv.Cast == mir.CastNarrow {
+			_, s := c.operandHeldStored(st, rv.A)
+			return s
+		}
+	case mir.RvAggregate:
+		switch rv.Agg {
+		case mir.AggSome, mir.AggOk:
+			if rv.Ops.Len == 1 {
+				_, s := c.operandHeldStored(st, c.body.Operands[rv.Ops.Start])
+				return s
+			}
+		case mir.AggStruct, mir.AggRecord:
+			var stored, prov setID
+			for _, o := range c.body.Operands[rv.Ops.Start:rv.Ops.End()] {
+				h, s := c.operandHeldStored(st, o)
+				stored = c.sets.unite(stored, s)
+				prov = c.sets.unite(prov, c.sets.minus(h, s))
+			}
+			return c.sets.minus(stored, prov)
+		}
+	}
+	return emptySet
+}
+
+// operandHeldStored is the held and content-stored sets a copy or move of o
+// carries before its effects: the root's own stored set for the whole root or
+// a path of payload pairs only; emptySet for anything else.
+func (c *checker) operandHeldStored(st *state, o mir.Operand) (setID, setID) {
+	if o.Kind != mir.OpCopy && o.Kind != mir.OpMove {
+		return emptySet, emptySet
+	}
+	p := c.paths.ofPlace(c.body, c.tab, o.Place)
+	pi := c.paths.get(p)
+	e := st.get(pi.root)
+	if len(pi.steps) == 0 {
+		return e.held, e.stored
+	}
+	if k, _, _ := fieldKey(pi); k == keyPayload {
+		return e.held, e.stored
+	}
+	return c.valueH(st, p), emptySet
 }
 
 // operand is the operand table: the set the value holds, with its checks.
