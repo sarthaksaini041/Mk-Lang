@@ -418,9 +418,9 @@ func TestR18_EndsKeepsViewAndAllocatorProvenance(t *testing.T) {
 				k := newKit(t)
 				ri := refI32(k)
 				ra := k.tab.Ref(k.Alloc)
-				newIn := k.method("Arena", "NewIn", types.NoReceiver, k.Arena, []types.Param{k.param("a", ra)}, k.Arena, types.EmptyErrors)
+				newIn := k.declare("Arena.NewIn", types.MemberKey("std.core", "Arena", "NewIn"), types.NoReceiver, nil, []types.Param{k.param("a", ra)}, k.Arena, types.EmptyErrors)
 				newIn.Flows.Sources = []types.Source{{Param: 1}}
-				put := k.method("Arena", "Put", types.ByShared, k.Arena, []types.Param{{Name: k.in.Intern("x"), Type: ri, Into: 1}}, types.Void, types.EmptyErrors)
+				k.method("Arena", "Put", types.ByShared, k.Arena, []types.Param{{Name: k.in.Intern("x"), Type: ri, Into: 1}}, types.Void, types.EmptyErrors)
 				reset := k.method("Arena", "Reset", types.ByMut, k.Arena, nil, types.Void, types.EmptyErrors)
 				reset.Flows.Ends = []types.ParamIndex{1}
 				free := k.method("Arena", "Free", types.ByValue, k.Arena, nil, types.Void, types.EmptyErrors)
@@ -489,7 +489,7 @@ func TestR18_EndsKeepsViewAndAllocatorProvenance(t *testing.T) {
 		k.structItem(k.std, "Fixed", 0, true, false, field("base", k.tab.RawPtr(types.U8)))
 		ft := k.named("Fixed")
 		mi := k.tab.Mut(types.I32)
-		fn := k.method("Fixed", "New", types.NoReceiver, ft, []types.Param{k.param("buf", mi)}, ft, types.EmptyErrors)
+		fn := k.declare("Fixed.New", types.MemberKey("std", "Fixed", "New"), types.NoReceiver, nil, []types.Param{k.param("buf", mi)}, ft, types.EmptyErrors)
 		fn.Flows.Sources = []types.Source{{Param: 1}}
 		reset := k.method("Fixed", "Reset", types.ByMut, ft, nil, types.Void, types.EmptyErrors)
 		reset.Flows.Ends = []types.ParamIndex{1}
